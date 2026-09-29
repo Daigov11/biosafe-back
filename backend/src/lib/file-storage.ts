@@ -3,10 +3,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import multer from 'multer'
 
-export const SANITARY_REGISTRATIONS_UPLOAD_DIR = path.resolve(
-  __dirname,
-  '../../uploads/sanitary-registrations',
-)
+// UPLOAD_DIR permite persistir los adjuntos fuera del código (volumen/carpeta dedicada).
+const UPLOAD_ROOT = process.env.UPLOAD_DIR
+  ? path.resolve(process.env.UPLOAD_DIR)
+  : path.resolve(__dirname, '../../uploads')
+
+export const SANITARY_REGISTRATIONS_UPLOAD_DIR = path.join(UPLOAD_ROOT, 'sanitary-registrations')
 
 fs.mkdirSync(SANITARY_REGISTRATIONS_UPLOAD_DIR, { recursive: true })
 

@@ -14,7 +14,8 @@
     "prisma:studio": "prisma studio --schema=../prisma/schema.prisma",
     "prisma:seed": "tsx ../prisma/seed.ts",
     "test:typecheck": "tsc --noEmit -p tsconfig.test.json",
-    "test": "npm run test:typecheck && vitest run"
+    "test": "npm run test:typecheck && vitest run",
+    "user:create-admin": "tsx src/scripts/create-admin.ts"
   },
   "keywords": [],
   "author": "",

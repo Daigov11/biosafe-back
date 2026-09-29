@@ -120,6 +120,13 @@ export async function updateQuote(id: number, data: UpdateQuoteInput) {
   }
 
   if (data.items) {
+    // Un ítem con snapshot emitido es inmutable: reemplazar los ítems lo destruiría.
+    const snapshots = await prisma.quoteItemSnapshot.count({ where: { quoteItem: { quoteId: id } } })
+    if (snapshots > 0) {
+      throw new QuoteValidationError(
+        'La cotización tiene costos emitidos (snapshot) y sus ítems no pueden reemplazarse; crea una nueva versión',
+      )
+    }
     for (const item of data.items) {
       const product = await prisma.product.findUnique({ where: { id: item.productId } })
       if (!product) throw new QuoteValidationError(`El producto con id ${item.productId} no existe`)

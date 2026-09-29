@@ -2,72 +2,60 @@ import cors from 'cors'
 import express from 'express'
 import morgan from 'morgan'
 import { prisma } from './lib/prisma.js'
+import { protectedMounts } from './api-routes.js'
+import { authenticate } from './middleware/auth.js'
 import { errorHandler } from './middleware/error-handler.js'
-import { bomRouter } from './modules/bom/bom.routes.js'
-import { catalogsRouter } from './modules/catalogs/catalogs.routes.js'
-import { customersRouter } from './modules/customers/customers.routes.js'
-import { dispatchesRouter } from './modules/dispatches/dispatches.routes.js'
-import { kitsRouter } from './modules/kits/kits.routes.js'
-import { lotsRouter } from './modules/lots/lots.routes.js'
-import { ordersRouter } from './modules/orders/orders.routes.js'
-import { planningRouter } from './modules/planning/planning.routes.js'
-import { productionOrdersRouter } from './modules/production-orders/production-orders.routes.js'
-import { productMaterialYieldsRouter } from './modules/product-material-yields/product-material-yields.routes.js'
-import { productStandardTimesRouter } from './modules/product-standard-times/product-standard-times.routes.js'
-import { productionProgressRouter } from './modules/production-progress/production-progress.routes.js'
-import { productsRouter } from './modules/products/products.routes.js'
-import { quotesRouter } from './modules/quotes/quotes.routes.js'
-import { rawMaterialsRouter } from './modules/raw-materials/raw-materials.routes.js'
-import { reportsRouter } from './modules/reports/reports.routes.js'
-import { routesRouter } from './modules/routes/routes.routes.js'
-import {
-  productSanitaryRegistrationsRouter,
-  sanitaryRegistrationsRouter,
-} from './modules/sanitary-registrations/sanitary-registrations.routes.js'
+import { authRouter } from './modules/auth/auth.routes.js'
+
+const allowedOrigins = (process.env.CORS_ORIGINS ?? 'http://localhost:5173')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean)
 
 export function createApp() {
   const app = express()
 
-  app.use(cors())
+  app.disable('x-powered-by')
+  app.use(
+    cors({
+      origin: (origin, callback) => {
+        // Peticiones sin Origin (curl, health checks, server-to-server) no pasan por CORS del navegador.
+        callback(null, !origin || allowedOrigins.includes(origin))
+      },
+      // La sesión viaja en cookie HttpOnly: el navegador solo la envía con credentials.
+      credentials: true,
+    }),
+  )
   app.use(express.json())
   app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'))
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    next()
+  })
   app.use('/api', (_req, res, next) => {
     res.setHeader('Cache-Control', 'no-store')
     next()
   })
 
+  // --- ÚNICAS rutas públicas: health, login y logout -----------------------
   app.get('/api/health', async (_req, res) => {
     try {
       await prisma.$queryRaw`SELECT 1`
       res.json({ status: 'ok', database: 'connected' })
     } catch (error) {
-      res.status(503).json({
-        status: 'error',
-        database: 'disconnected',
-        message: error instanceof Error ? error.message : 'unknown error',
-      })
+      // Público: no se expone el detalle del error, solo se registra.
+      console.error('health check falló', error)
+      res.status(503).json({ status: 'error', database: 'disconnected' })
     }
   })
+  // login/logout son públicos; /me y /change-password exigen sesión dentro del router.
+  app.use('/api/auth', authRouter)
 
-  app.use('/api/raw-materials', rawMaterialsRouter)
-  app.use('/api/products/:id/bom', bomRouter)
-  app.use('/api/products/:id/standard-times', productStandardTimesRouter)
-  app.use('/api/products/:id/material-yields', productMaterialYieldsRouter)
-  app.use('/api/products/:id/sanitary-registrations', productSanitaryRegistrationsRouter)
-  app.use('/api/products', productsRouter)
-  app.use('/api/routes', routesRouter)
-  app.use('/api/kits', kitsRouter)
-  app.use('/api/customers', customersRouter)
-  app.use('/api/quotes', quotesRouter)
-  app.use('/api/orders', ordersRouter)
-  app.use('/api/lots', lotsRouter)
-  app.use('/api/production-orders', productionOrdersRouter)
-  app.use('/api/production-progress', productionProgressRouter)
-  app.use('/api/dispatches', dispatchesRouter)
-  app.use('/api/planning', planningRouter)
-  app.use('/api/reports', reportsRouter)
-  app.use('/api/sanitary-registrations', sanitaryRegistrationsRouter)
-  app.use('/api', catalogsRouter)
+  // --- Todo lo demás bajo /api exige sesión (401 sin ella) ------------------
+  app.use('/api', authenticate)
+  for (const mount of protectedMounts) {
+    app.use(mount.path, mount.guard, mount.router)
+  }
 
   app.use((_req, res) => {
     res.status(404).json({ status: 'error', message: 'Recurso no encontrado' })

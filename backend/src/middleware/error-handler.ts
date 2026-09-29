@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from 'express'
 import { ZodError } from 'zod'
+import { AuditReasonRequiredError } from '../lib/audit.js'
 import { CodeConflictError } from '../lib/code-generator.js'
 
 export function errorHandler(
@@ -27,6 +28,11 @@ export function errorHandler(
   // rechazada correctamente por la capa de creación.
   if (error instanceof CodeConflictError) {
     res.status(409).json({ status: 'error', message: error.message })
+    return
+  }
+
+  if (error instanceof AuditReasonRequiredError) {
+    res.status(400).json({ status: 'error', message: error.message })
     return
   }
 

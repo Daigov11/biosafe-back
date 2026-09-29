@@ -122,6 +122,7 @@ model RawMaterial {
   bomItems                 BomItem[]
   productionOrderMaterials ProductionOrderMaterial[]
   materialYields           ProductMaterialYield[]
+  costs                    MaterialCost[]
 
   @@index([familyId])
   @@index([categoryId])
@@ -267,6 +268,8 @@ model Product {
   lots           Lot[]           @relation("LotProduct")
   plantCapacities PlantCapacity[]
   standardTimes  ProductStandardTime[]
+  laborCosts     LaborCost[]
+  costPolicy     ProductCostPolicy?
   sanitaryRegistrationItems SanitaryRegistrationItem[]
   materialYields ProductMaterialYield[]
 
@@ -389,6 +392,12 @@ model Quote {
   status     QuoteStatus @default(DRAFT)
   quoteDate  DateTime    @default(now())
   notes      String?     @db.Text
+  // Cotización técnico-comercial: entidad final (p.ej. AVIVA), vigencia real
+  // (antes texto libre "SEPTIEMBRE") y condiciones comerciales.
+  endEntity       String?
+  validUntil      DateTime?
+  currency        String    @default("PEN")
+  commercialTerms String?   @db.Text
   createdAt  DateTime    @default(now())
   updatedAt  DateTime    @updatedAt
 
@@ -427,6 +436,9 @@ model QuoteItem {
 
   quote   Quote   @relation(fields: [quoteId], references: [id], onDelete: Cascade)
   product Product @relation("QuoteItemProduct", fields: [productId], references: [id])
+
+  snapshot       QuoteItemSnapshot?
+  priceOverrides QuotePriceOverride[]
 
   @@index([quoteId])
   @@index([productId])
@@ -918,6 +930,18 @@ model ProductMaterialYield {
   notes         String?  @db.Text
   active        Boolean  @default(true)
 
+  // Rendimiento oficial = `unitsPerRoll`, ingresado a mano y validado por
+  // Ingeniería. La sugerencia calculada (ancho/largo útil y tizado) nunca lo
+  // reemplaza; si difiere de la sugerencia, `overrideReason` es obligatorio.
+  validationStatus    ValidationStatus @default(PENDING)
+  validatedById       Int?
+  validatedAt         DateTime?
+  usableRollWidth     Decimal? @db.Decimal(10, 3)
+  usableRollLength    Decimal? @db.Decimal(10, 3)
+  nestingNote         String?
+  suggestedUnitsPerRoll Int?
+  overrideReason      String?  @db.Text
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -928,4 +952,330 @@ model ProductMaterialYield {
   @@index([productId])
   @@index([rawMaterialId])
   @@map("product_material_yields")
+}
+
+
+// ===========================================================================
+// Usuarios, sesiones y auditoría (base del módulo de cotización técnico-comercial)
+// ===========================================================================
+
+enum UserRole {
+  COMERCIAL
+  COSTOS
+  INGENIERIA
+  DIRECCION
+  ADMIN
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  email        String   @unique
+  name         String
+  passwordHash String
+  role         UserRole
+  active       Boolean  @default(true)
+  failedLogins Int      @default(0)
+  lockedUntil  DateTime?
+  lastLoginAt  DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sessions  Session[]
+  auditLogs AuditLog[]
+
+  @@map("users")
+}
+
+// El token que recibe el cliente nunca se guarda: solo su hash SHA-256.
+model Session {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// Registro inmutable: quién, cuándo, qué, valor anterior, valor nuevo y motivo.
+// `userEmail`/`userRole` se copian para que la traza sobreviva a cambios de usuario.
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  userId    Int?
+  userEmail String
+  userRole  String
+  action    String
+  entity    String
+  entityId  String?
+  field     String?
+  oldValue  Json?
+  newValue  Json?
+  reason    String?  @db.Text
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entity, entityId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ===========================================================================
+// Costos maestros (versionados por vigencia; nunca se sobrescriben)
+// ===========================================================================
+
+enum CostSource {
+  OWN
+  SUPPLIER
+}
+
+enum PriceUnit {
+  ROLL
+  METER
+  CENTIMETER
+  UNIT
+  BOX
+  PACK
+  KIT
+}
+
+enum ServiceCategory {
+  PEEL_OPEN
+  STICKER
+  PACK_PREPARATION
+  BOX
+  BOX_STICKER
+  STERILIZATION
+  OTHER
+}
+
+enum LaborMode {
+  FIXED_PER_UNIT
+  MINUTES_RATE
+  SUPPLIER
+}
+
+enum ValidationStatus {
+  PENDING
+  VALIDATED
+}
+
+// IGV, margen sugerido, etc. `isFixture` = dato de validación histórica, no aprobable.
+model CostParameter {
+  id            Int      @id @default(autoincrement())
+  key           String
+  value         Decimal  @db.Decimal(14, 6)
+  effectiveFrom DateTime
+  notes         String?
+  isFixture     Boolean  @default(false)
+  createdById   Int?
+  createdAt     DateTime @default(now())
+
+  @@unique([key, effectiveFrom])
+  @@map("cost_parameters")
+}
+
+model MaterialCost {
+  id                Int       @id @default(autoincrement())
+  rawMaterialId     Int
+  price             Decimal   @db.Decimal(14, 4)
+  priceUnit         PriceUnit
+  includesTax       Boolean
+  // Largo útil del rollo (p.ej. 2750 m aunque el rollo diga 2800 m).
+  usableLength      Decimal?  @db.Decimal(12, 3)
+  supplier          String?
+  effectiveFrom     DateTime
+  notes             String?
+  isFixture         Boolean   @default(false)
+  pendingValidation Boolean   @default(false)
+  createdById       Int?
+  createdAt         DateTime  @default(now())
+
+  rawMaterial RawMaterial @relation(fields: [rawMaterialId], references: [id])
+
+  @@index([rawMaterialId, effectiveFrom])
+  @@map("material_costs")
+}
+
+model ServiceCost {
+  id                Int             @id @default(autoincrement())
+  code              String
+  name              String
+  category          ServiceCategory
+  price             Decimal         @db.Decimal(14, 4)
+  includesTax       Boolean
+  // Kits que cubre el precio (p.ej. 8 por caja / por bolsa).
+  unitsPerPack      Int?
+  supplier          String?
+  effectiveFrom     DateTime
+  notes             String?
+  isFixture         Boolean         @default(false)
+  pendingValidation Boolean         @default(false)
+  createdById       Int?
+  createdAt         DateTime        @default(now())
+
+  @@unique([code, effectiveFrom])
+  @@map("service_costs")
+}
+
+model LaborCost {
+  id                Int       @id @default(autoincrement())
+  productId         Int
+  mode              LaborMode
+  // Siempre sin IGV, como en la plantilla (la mano de obra no lleva IGV).
+  amount            Decimal   @db.Decimal(12, 4)
+  ratePerMinute     Decimal?  @db.Decimal(12, 4)
+  supplier          String?
+  quotationEvidence String?   @db.Text
+  effectiveFrom     DateTime
+  notes             String?
+  isFixture         Boolean   @default(false)
+  pendingValidation Boolean   @default(false)
+  createdById       Int?
+  createdAt         DateTime  @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, effectiveFrom])
+  @@map("labor_costs")
+}
+
+// Ficha comercial del producto: origen del costo y parámetros de empaque.
+model ProductCostPolicy {
+  productId           Int        @id
+  costSource          CostSource @default(OWN)
+  // Obligatorios cuando costSource = SUPPLIER.
+  supplier            String?
+  supplierUnitCost    Decimal?   @db.Decimal(14, 4)
+  supplierIncludesTax Boolean?
+  supplierValidFrom   DateTime?
+  supplierValidUntil  DateTime?
+  supplierEvidence    String?    @db.Text
+  suggestedMargin     Decimal?   @db.Decimal(6, 4)
+  unitsPerBox         Int?
+  unitsPerBag         Int?
+  updatedById         Int?
+  updatedAt           DateTime   @updatedAt
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@map("product_cost_policies")
+}
+
+// ===========================================================================
+// Snapshot inmutable de la cotización: componentes y líneas de costo usadas
+// ===========================================================================
+
+enum CostLineKind {
+  MATERIAL
+  LABOR
+  SERVICE
+  PACKAGING
+}
+
+enum CostLineScope {
+  COMPONENT
+  KIT
+}
+
+// Restrict a propósito: borrar el ítem no puede destruir el snapshot emitido.
+model QuoteItemSnapshot {
+  id            Int      @id @default(autoincrement())
+  quoteItemId   Int      @unique
+  productCode   String
+  productName   String
+  description   String?  @db.Text
+  presentation  String?
+  size          String?
+  grammage      Decimal? @db.Decimal(10, 3)
+  width         Decimal? @db.Decimal(10, 3)
+  length        Decimal? @db.Decimal(10, 3)
+  piecesCount   Int
+  quantity      Decimal  @db.Decimal(12, 3)
+  igvRate       Decimal  @db.Decimal(8, 6)
+  margin        Decimal  @db.Decimal(8, 6)
+  laborTotal        Decimal @db.Decimal(14, 6)
+  costWithTax       Decimal @db.Decimal(14, 6)
+  costWithoutTax    Decimal @db.Decimal(14, 6)
+  priceWithoutTax   Decimal @db.Decimal(14, 6)
+  priceWithTax      Decimal @db.Decimal(14, 6)
+  // Dato de validación histórica: nunca aprobable como cotización real.
+  isFixture             Boolean @default(false)
+  historicalUnvalidated Boolean @default(false)
+  blockers      Json?
+  issuedAt      DateTime @default(now())
+  createdById   Int?
+
+  quoteItem  QuoteItem                @relation(fields: [quoteItemId], references: [id], onDelete: Restrict)
+  components QuoteComponentSnapshot[]
+  lines      QuoteCostLine[]
+
+  @@map("quote_item_snapshots")
+}
+
+model QuoteComponentSnapshot {
+  id                 Int        @id @default(autoincrement())
+  snapshotId         Int
+  sequence           Int
+  componentProductId Int?
+  code               String
+  name               String
+  description        String?    @db.Text
+  quantity           Decimal    @db.Decimal(12, 4)
+  countsTowardPieces Boolean    @default(true)
+  yieldUnits         Int?
+  costSource         CostSource @default(OWN)
+  laborCost          Decimal    @db.Decimal(14, 6)
+  subtotal           Decimal    @db.Decimal(14, 6)
+
+  snapshot QuoteItemSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  lines    QuoteCostLine[]
+
+  @@index([snapshotId])
+  @@map("quote_component_snapshots")
+}
+
+model QuoteCostLine {
+  id                    Int           @id @default(autoincrement())
+  snapshotId            Int
+  componentId           Int?
+  scope                 CostLineScope
+  kind                  CostLineKind
+  label                 String
+  formulaText           String?       @db.Text
+  technicalNote         String?       @db.Text
+  amount                Decimal       @db.Decimal(14, 6)
+  includesTax           Boolean
+  sourceType            String
+  sourceId              Int?
+  pendingValidation     Boolean       @default(false)
+  historicalReference   Boolean       @default(false)
+
+  snapshot  QuoteItemSnapshot        @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  component QuoteComponentSnapshot?  @relation(fields: [componentId], references: [id], onDelete: Cascade)
+
+  @@index([snapshotId])
+  @@index([componentId])
+  @@map("quote_cost_lines")
+}
+
+model QuotePriceOverride {
+  id                  Int      @id @default(autoincrement())
+  quoteItemId         Int
+  originalPriceWithTax Decimal @db.Decimal(14, 6)
+  overridePriceWithTax Decimal @db.Decimal(14, 6)
+  reason              String   @db.Text
+  requestedById       Int
+  approvedById        Int?
+  approvedAt          DateTime?
+  createdAt           DateTime @default(now())
+
+  quoteItem QuoteItem @relation(fields: [quoteItemId], references: [id], onDelete: Restrict)
+
+  @@index([quoteItemId])
+  @@map("quote_price_overrides")
 }

@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from 'express'
 import { Router } from 'express'
 import { asyncHandler } from '../../lib/async-handler.js'
 import { sanitaryRegistrationDocumentUpload } from '../../lib/file-storage.js'
+import { requireResource } from '../../middleware/auth.js'
 import * as controller from './sanitary-registrations.controller.js'
 
 export const sanitaryRegistrationsRouter = Router()
@@ -32,11 +33,13 @@ sanitaryRegistrationsRouter.delete('/:id/changes/:changeId', asyncHandler(contro
 
 sanitaryRegistrationsRouter.post(
   '/:id/documents',
+  requireResource('files'), // antes de multer: sin permiso no se escribe nada en disco
   handleUpload,
   asyncHandler(controller.uploadDocument),
 )
 sanitaryRegistrationsRouter.get(
   '/:id/documents/:documentId/download',
+  requireResource('files'),
   asyncHandler(controller.downloadDocument),
 )
 
