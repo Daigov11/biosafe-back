@@ -1,0 +1,21 @@
+node_modules/
+dist/
+build/
+*.log
+.DS_Store
+
+.env
+!.env.example
+
+backend/generated/
+backend/uploads/
+prisma/.env
+
+*.tsbuildinfo
+
+# Material local de análisis y referencias de reuniones. No forma parte del
+# producto desplegable ni debe subir al repositorio (PDF, Excel y capturas).
+docs/*.pdf
+docs/*.xlsx
+docs/excels/
+docs/references/images/

@@ -1,0 +1,931 @@
+// BIOSAFE ERP — esquema de dominio
+// Iteración 3: Maestro de Materia Prima + Maestro de Productos.
+// `Route` se incorpora aquí solo como maestro mínimo (código/nombre) para
+// dejar lista la FK product.routeId; `route_steps` y el resto del maestro de
+// Rutas se completan en la Iteración 5. BOM se incorpora en la Iteración 4.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../backend/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Maestro de Materia Prima
+// ---------------------------------------------------------------------------
+
+model MaterialFamily {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique
+  name        String
+  description String?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  categories   MaterialCategory[]
+  rawMaterials RawMaterial[]
+
+  @@map("material_families")
+}
+
+model MaterialCategory {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique
+  name        String
+  description String?
+  familyId    Int?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  family       MaterialFamily? @relation(fields: [familyId], references: [id])
+  rawMaterials RawMaterial[]
+
+  @@index([familyId])
+  @@map("material_categories")
+}
+
+model Unit {
+  id        Int      @id @default(autoincrement())
+  code      String   @unique
+  name      String
+  symbol    String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  purchaseFor    RawMaterial[] @relation("PurchaseUnit")
+  inventoryFor   RawMaterial[] @relation("InventoryUnit")
+  consumptionFor RawMaterial[] @relation("ConsumptionUnit")
+
+  @@map("units")
+}
+
+model RawMaterial {
+  id         Int     @id @default(autoincrement())
+  code       String  @unique
+  familyId   Int?
+  categoryId Int?
+  name       String
+  description String? @db.Text
+
+  // Clasificación libre y editable (p.ej. "TELA", "ADHESIVO", "EMPAQUE").
+  // No se restringe a un enum cerrado: varios materiales del catálogo
+  // actual (batas, mangas, puños) están clasificados como materia prima
+  // por costumbre operativa y deben poder reclasificarse manualmente.
+  type String?
+
+  grammage     Decimal? @db.Decimal(10, 3)
+  grammageUnit String?
+  width        Decimal? @db.Decimal(10, 3)
+  widthUnit    String?
+  length       Decimal? @db.Decimal(10, 3)
+  lengthUnit   String?
+
+  color        String?
+  size         String?
+  presentation String?
+
+  // Peso neto declarado por el proveedor para un rollo (kg reales de
+  // ficha/etiqueta). Distinto del peso teórico, que siempre se calcula en
+  // el backend a partir de gramaje × ancho × largo — nunca se persiste.
+  netWeightPerRollKg Decimal? @db.Decimal(10, 3)
+
+  purchaseUnitId    Int?
+  inventoryUnitId   Int?
+  consumptionUnitId Int?
+
+  controlByLot          Boolean @default(false)
+  controlByUnit         Boolean @default(false)
+  controlByDimensions   Boolean @default(false)
+  allowsReusableBalance Boolean @default(false)
+
+  // Campo informativo únicamente: la demo lo muestra en pantalla, pero el
+  // stock real vive conceptualmente en almacén/kardex, no en este maestro.
+  referenceStock Decimal? @db.Decimal(12, 3)
+
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  family          MaterialFamily?   @relation(fields: [familyId], references: [id])
+  category        MaterialCategory? @relation(fields: [categoryId], references: [id])
+  purchaseUnit    Unit?             @relation("PurchaseUnit", fields: [purchaseUnitId], references: [id])
+  inventoryUnit   Unit?             @relation("InventoryUnit", fields: [inventoryUnitId], references: [id])
+  consumptionUnit Unit?             @relation("ConsumptionUnit", fields: [consumptionUnitId], references: [id])
+
+  bomItems                 BomItem[]
+  productionOrderMaterials ProductionOrderMaterial[]
+  materialYields           ProductMaterialYield[]
+
+  @@index([familyId])
+  @@index([categoryId])
+  @@index([purchaseUnitId])
+  @@index([inventoryUnitId])
+  @@index([consumptionUnitId])
+  @@map("raw_materials")
+}
+
+// ---------------------------------------------------------------------------
+// Maestro de Rutas
+// ---------------------------------------------------------------------------
+
+model Route {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique
+  name        String
+  description String?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  products Product[]
+  steps    RouteStep[]
+
+  @@map("routes")
+}
+
+model RouteStep {
+  id          Int      @id @default(autoincrement())
+  routeId     Int
+  code        String
+  name        String
+  description String?
+  sequence    Int
+  active      Boolean  @default(true)
+  // Línea de producción física donde ocurre este paso (p.ej. "Corte",
+  // "Costura", "Esterilización"). Texto libre configurable desde el
+  // maestro de Rutas; se deriva a Registro Diario, detalle de OP,
+  // Programación de Planta y reportes — nunca se vuelve a pedir a mano.
+  productionLine String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  route Route @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  progress ProductionProgress[]
+  standardTimes ProductStandardTime[]
+
+  @@unique([routeId, sequence])
+  @@index([routeId])
+  @@map("route_steps")
+}
+
+// ---------------------------------------------------------------------------
+// Maestro de Productos
+// ---------------------------------------------------------------------------
+
+enum ProductType {
+  INDIVIDUAL
+  KIT
+  SEMI_FINISHED
+}
+
+model ProductFamily {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique
+  name        String
+  description String?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  categories     ProductCategory[]
+  products       Product[]
+  plantCapacities PlantCapacity[]
+
+  @@map("product_families")
+}
+
+model ProductCategory {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique
+  name        String
+  description String?
+  familyId    Int?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  family   ProductFamily? @relation(fields: [familyId], references: [id])
+  products Product[]
+
+  @@index([familyId])
+  @@map("product_categories")
+}
+
+model Product {
+  id         Int     @id @default(autoincrement())
+  code       String  @unique
+  familyId   Int?
+  categoryId Int?
+  name       String
+  description String? @db.Text
+
+  productType ProductType @default(INDIVIDUAL)
+
+  presentation String?
+  width        Decimal? @db.Decimal(10, 3)
+  length       Decimal? @db.Decimal(10, 3)
+  grammage     Decimal? @db.Decimal(10, 3)
+  size         String?
+
+  // Características especiales del producto (sección 12 del requerimiento).
+  // No se guardan aquí tipo/medida de fenestra, adhesivo, refuerzo o
+  // laminado: esa granularidad pertenece al componente del BOM
+  // (Iteración 4), no al maestro de producto.
+  sterile      Boolean @default(false)
+  fenestrated  Boolean @default(false)
+  reinforced   Boolean @default(false)
+  laminated    Boolean @default(false)
+  usesAdhesive Boolean @default(false)
+  usesLabel    Boolean @default(false)
+  usesBag      Boolean @default(false)
+
+  routeId Int?
+
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  family   ProductFamily?   @relation(fields: [familyId], references: [id])
+  category ProductCategory? @relation(fields: [categoryId], references: [id])
+  route    Route?           @relation(fields: [routeId], references: [id])
+
+  // Composición propia del producto (una sola BOM activa por producto en
+  // esta demo, sin versionado) y uso de este producto como componente
+  // dentro de la composición de otros productos (p.ej. un Kit).
+  bom           BomHeader?
+  usedInBomItems BomItem[] @relation("BomComponentProduct")
+
+  quoteItems     QuoteItem[]     @relation("QuoteItemProduct")
+  orderItems     OrderItem[]     @relation("OrderItemProduct")
+  lots           Lot[]           @relation("LotProduct")
+  plantCapacities PlantCapacity[]
+  standardTimes  ProductStandardTime[]
+  sanitaryRegistrationItems SanitaryRegistrationItem[]
+  materialYields ProductMaterialYield[]
+
+  @@index([familyId])
+  @@index([categoryId])
+  @@index([routeId])
+  @@map("products")
+}
+
+// ---------------------------------------------------------------------------
+// Composición / BOM
+// ---------------------------------------------------------------------------
+
+enum BomComponentType {
+  RAW_MATERIAL
+  PRODUCT
+}
+
+enum BomComponentClass {
+  PRODUCTIVE_MATERIAL
+  PACKAGING_MATERIAL
+}
+
+model BomHeader {
+  id        Int      @id @default(autoincrement())
+  productId Int      @unique
+  active    Boolean  @default(true)
+  notes     String?  @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  product Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  items   BomItem[]
+
+  @@map("bom_headers")
+}
+
+model BomItem {
+  id            Int               @id @default(autoincrement())
+  bomHeaderId   Int
+  componentType BomComponentType
+  componentClass BomComponentClass @default(PRODUCTIVE_MATERIAL)
+
+  // Exactamente uno de los dos según componentType (validado en servicio/API).
+  rawMaterialId      Int?
+  componentProductId Int?
+
+  quantity        Decimal  @db.Decimal(12, 4)
+  unit            String
+  wastePercentage Decimal? @db.Decimal(5, 2)
+
+  requiredWidth  Decimal? @db.Decimal(10, 3)
+  requiredLength Decimal? @db.Decimal(10, 3)
+
+  notes    String?
+  sequence Int     @default(0)
+  required Boolean @default(true)
+
+  // Sección "13 piezas comerciales" (caso PD GLOBAL / kit de laparotomía):
+  // indica si este ítem del BOM cuenta como una pieza comercial del kit.
+  // No se infiere automáticamente de componentType: por convención
+  // PRODUCT suele ser true y RAW_MATERIAL/empaque suele ser false, pero es
+  // un campo editable — p.ej. un indicador químico (RAW_MATERIAL) puede
+  // marcarse true si el cliente lo cuenta como pieza, mientras que un
+  // envoltorio (RAW_MATERIAL) se deja en false por ser material de
+  // empaque. El TOTAL DE PIEZAS del kit siempre suma únicamente los ítems
+  // de primer nivel del BOM con este campo en true — nunca se infiere del
+  // número de filas ni se convierte un insumo en producto solo para contar.
+  countsTowardKitPieces Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bomHeader        BomHeader   @relation(fields: [bomHeaderId], references: [id], onDelete: Cascade)
+  rawMaterial      RawMaterial? @relation(fields: [rawMaterialId], references: [id])
+  componentProduct Product?     @relation("BomComponentProduct", fields: [componentProductId], references: [id])
+
+  @@index([bomHeaderId])
+  @@index([rawMaterialId])
+  @@index([componentProductId])
+  @@map("bom_items")
+}
+
+// ---------------------------------------------------------------------------
+// Comercial: Cotización → Pedido
+// ---------------------------------------------------------------------------
+
+enum QuoteStatus {
+  DRAFT
+  SENT
+  APPROVED
+  REJECTED
+}
+
+enum OrderStatus {
+  PENDING_REVIEW
+  REVIEWED
+  APPROVED
+  CANCELLED
+}
+
+model Customer {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  taxId     String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  quotes Quote[]
+  orders Order[]
+
+  @@map("customers")
+}
+
+model Quote {
+  id         Int         @id @default(autoincrement())
+  code       String      @unique
+  customerId Int
+  status     QuoteStatus @default(DRAFT)
+  quoteDate  DateTime    @default(now())
+  notes      String?     @db.Text
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  customer Customer    @relation(fields: [customerId], references: [id])
+  items    QuoteItem[]
+  order    Order?
+
+  @@index([customerId])
+  @@map("quotes")
+}
+
+model QuoteItem {
+  id        Int      @id @default(autoincrement())
+  quoteId   Int
+  productId Int
+  // Referencia al producto + cantidad comercial únicamente: gramaje,
+  // dimensiones, ruta, características y BOM se consultan siempre desde el
+  // maestro de Producto, nunca se copian aquí.
+  quantity  Decimal  @db.Decimal(12, 3)
+
+  // Snapshot comercial de ESTA cotización (caso PD GLOBAL 3CBIO01-179):
+  // costo y precio por kit/unidad al momento de cotizar. Vive únicamente
+  // en QuoteItem — nunca se copia al maestro de Producto ni de Materia
+  // Prima, que no tienen ni deben tener campos de costo/precio. El
+  // subtotal (con/sin IGV) se deriva siempre de quantity × estos campos,
+  // nunca se persiste.
+  unitCostWithTax    Decimal? @db.Decimal(12, 4)
+  unitCostWithoutTax Decimal? @db.Decimal(12, 4)
+  marginPercentage   Decimal? @db.Decimal(5, 2)
+  unitPriceWithTax   Decimal? @db.Decimal(12, 4)
+
+  notes     String?
+  sequence  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  quote   Quote   @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  product Product @relation("QuoteItemProduct", fields: [productId], references: [id])
+
+  @@index([quoteId])
+  @@index([productId])
+  @@map("quote_items")
+}
+
+model Order {
+  id           Int         @id @default(autoincrement())
+  code         String      @unique
+  customerId   Int
+  quoteId      Int         @unique
+  status              OrderStatus @default(PENDING_REVIEW)
+  orderDate           DateTime    @default(now())
+  requiredDate        DateTime?
+  purchaseOrderNumber String?
+  notes               String?     @db.Text
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  customer Customer    @relation(fields: [customerId], references: [id])
+  quote    Quote       @relation(fields: [quoteId], references: [id])
+  items    OrderItem[]
+  lots     Lot[]
+
+  @@index([customerId])
+  @@map("orders")
+}
+
+model OrderItem {
+  id        Int      @id @default(autoincrement())
+  orderId   Int
+  productId Int
+  quantity  Decimal  @db.Decimal(12, 3)
+  notes     String?
+  sequence  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order    Order              @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product  Product            @relation("OrderItemProduct", fields: [productId], references: [id])
+  override OrderItemOverride?
+  lot      Lot?
+
+  @@index([orderId])
+  @@index([productId])
+  @@map("order_items")
+}
+
+model OrderItemOverride {
+  id          Int      @id @default(autoincrement())
+  orderItemId Int      @unique
+  // Excepción puntual de este pedido (p.ej. una variante o instrucción
+  // especial). Nunca modifica el producto maestro.
+  notes       String   @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  @@map("order_item_overrides")
+}
+
+// ---------------------------------------------------------------------------
+// Producción: Lote → Orden de Producción
+// ---------------------------------------------------------------------------
+
+enum LotStatus {
+  PLANNED
+  IN_PRODUCTION
+  QUARANTINE
+  RELEASED
+  FINISHED
+}
+
+enum ProductionOrderStatus {
+  DRAFT
+  RELEASED
+  IN_PRODUCTION
+  IN_QUALITY
+  COMPLETED
+  CANCELLED
+}
+
+enum ProductionOrderMaterialClass {
+  PRODUCTIVE_MATERIAL
+  PACKAGING_MATERIAL
+}
+
+enum LabelApprovalStatus {
+  PENDING
+  IN_REVIEW
+  APPROVED
+  REJECTED
+}
+
+model Lot {
+  id             Int       @id @default(autoincrement())
+  lotCode        String    @unique
+  orderId        Int
+  orderItemId    Int       @unique
+  productId      Int
+  quantity       Decimal   @db.Decimal(12, 3)
+  status         LotStatus @default(PLANNED)
+  referenceLotId Int?
+  expirationDate DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  order        Order    @relation(fields: [orderId], references: [id])
+  orderItem    OrderItem @relation(fields: [orderItemId], references: [id])
+  product      Product  @relation("LotProduct", fields: [productId], references: [id])
+  referenceLot Lot?     @relation("LotReference", fields: [referenceLotId], references: [id])
+  referencedBy Lot[]    @relation("LotReference")
+
+  productionOrder ProductionOrder?
+  labelApproval   LabelApproval?
+  progress        ProductionProgress[]
+  dispatches      Dispatch[]
+  plantSchedule   PlantSchedule?
+
+  @@index([orderId])
+  @@index([productId])
+  @@map("lots")
+}
+
+model ProductionOrder {
+  id             Int                   @id @default(autoincrement())
+  code           String                @unique
+  lotId          Int                   @unique
+  status         ProductionOrderStatus @default(DRAFT)
+  brand          String?
+  productionDate DateTime?
+  dueDate        DateTime?
+  notes          String?               @db.Text
+
+  // Firmas operativas (sección 21 del requerimiento). Solo nombre + fecha:
+  // no se modela una firma digital real en esta demo.
+  technicalDirectorName String?
+  technicalDirectorDate DateTime?
+  productionManagerName String?
+  productionManagerDate DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lot       Lot                       @relation(fields: [lotId], references: [id], onDelete: Cascade)
+  materials ProductionOrderMaterial[]
+  progress  ProductionProgress[]
+
+  @@map("production_orders")
+}
+
+model ProductionOrderMaterial {
+  id                Int                           @id @default(autoincrement())
+  productionOrderId Int
+  rawMaterialId     Int
+  materialClass     ProductionOrderMaterialClass
+  // Instantánea operativa calculada por explosión de BOM al generar la OP:
+  // no se vuelve a recalcular ni se edita como si fuera el maestro.
+  requiredQuantity  Decimal                       @db.Decimal(14, 4)
+  unit              String
+  wastePercentage   Decimal?                      @db.Decimal(5, 2)
+
+  // Campos operativos de dispensación (secciones 18–19 del requerimiento).
+  dispensedLot       String?
+  protocolNumber     String?
+  dispensedQuantity  Decimal?  @db.Decimal(14, 4)
+  dispensedDate      DateTime?
+  additionalQuantity Decimal?  @db.Decimal(14, 4)
+  returnedQuantity   Decimal?  @db.Decimal(14, 4)
+  warehouseApproval  Boolean   @default(false)
+  productionApproval Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  productionOrder ProductionOrder @relation(fields: [productionOrderId], references: [id], onDelete: Cascade)
+  rawMaterial     RawMaterial     @relation(fields: [rawMaterialId], references: [id])
+
+  @@index([productionOrderId])
+  @@index([rawMaterialId])
+  @@map("production_order_materials")
+}
+
+model LabelApproval {
+  id         Int                 @id @default(autoincrement())
+  lotId      Int                 @unique
+  status     LabelApprovalStatus @default(PENDING)
+  notes      String?
+  reviewedAt DateTime?
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+
+  lot Lot @relation(fields: [lotId], references: [id], onDelete: Cascade)
+
+  @@map("label_approvals")
+}
+
+// ---------------------------------------------------------------------------
+// Iteración 7: Registro de avance, calidad/PT y despachos.
+// Solo se persisten cantidades reales por registro; porcentajes, PT,
+// despachado y saldo se derivan siempre en el backend a partir de estos
+// registros (nunca se guarda un porcentaje ni un acumulado manual).
+// ---------------------------------------------------------------------------
+
+model ProductionProgress {
+  id                Int      @id @default(autoincrement())
+  productionOrderId Int
+  lotId             Int
+  routeStepId       Int
+  date              DateTime @default(now())
+  quantity          Decimal  @db.Decimal(12, 3)
+  notes             String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  productionOrder ProductionOrder @relation(fields: [productionOrderId], references: [id], onDelete: Cascade)
+  lot             Lot             @relation(fields: [lotId], references: [id], onDelete: Cascade)
+  routeStep       RouteStep       @relation(fields: [routeStepId], references: [id])
+
+  @@index([productionOrderId])
+  @@index([lotId])
+  @@index([routeStepId])
+  @@map("production_progress")
+}
+
+model Dispatch {
+  id          Int      @id @default(autoincrement())
+  lotId       Int
+  date        DateTime @default(now())
+  quantity    Decimal  @db.Decimal(12, 3)
+  guideNumber String
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  lot Lot @relation(fields: [lotId], references: [id], onDelete: Cascade)
+
+  @@index([lotId])
+  @@map("dispatches")
+}
+
+// ---------------------------------------------------------------------------
+// Iteración 8: Programación de Planta.
+// PlantSchedule solo guarda información manual de planeamiento (prioridad,
+// fechas, comentarios); cliente, producto, lote, requerido y descripción se
+// consultan siempre desde las relaciones del lote, nunca se duplican aquí.
+// ---------------------------------------------------------------------------
+
+model PlantCapacity {
+  id              Int      @id @default(autoincrement())
+  code            String   @unique
+  name            String
+  dailyCapacity   Decimal  @db.Decimal(12, 3)
+  unit            String
+  productId       Int?
+  productFamilyId Int?
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  product       Product?       @relation(fields: [productId], references: [id])
+  productFamily ProductFamily? @relation(fields: [productFamilyId], references: [id])
+
+  @@index([productId])
+  @@index([productFamilyId])
+  @@map("plant_capacities")
+}
+
+model PlantSchedule {
+  id              Int       @id @default(autoincrement())
+  lotId           Int       @unique
+  priority        Int
+  plannedDate     DateTime?
+  startDate       DateTime?
+  offeredEndDate  DateTime?
+  comments        String?   @db.Text
+  schedulingNotes String?   @db.Text
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  lot Lot @relation(fields: [lotId], references: [id], onDelete: Cascade)
+
+  @@map("plant_schedules")
+}
+
+// ---------------------------------------------------------------------------
+// Iteración 9: Tiempos estándar por producto/paso. Si no existe un
+// registro para un producto/paso dado, el reporte de Situación de Pedido
+// debe mostrar el campo vacío — nunca inventar un valor.
+// ---------------------------------------------------------------------------
+
+model ProductStandardTime {
+  id                  Int      @id @default(autoincrement())
+  productId           Int
+  routeStepId         Int
+  standardTimeMinutes Decimal  @db.Decimal(10, 2)
+  people              Int?
+  effectiveFrom       DateTime @default(now())
+  notes               String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  routeStep RouteStep @relation(fields: [routeStepId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, routeStepId])
+  @@index([productId])
+  @@index([routeStepId])
+  @@map("product_standard_times")
+}
+
+// ---------------------------------------------------------------------------
+// Registros Sanitarios (DIGEMID) de BIOSAFE — modelo real, no genérico.
+// Un Registro Sanitario (p.ej. DM0682N) es UNA sola entidad a lo largo de
+// toda su vida regulatoria: la inscripción original y cada resolución
+// posterior (inclusión de códigos, actualización de rotulado, renovación)
+// son `SanitaryRegistrationChange` del MISMO registro — nunca se crea un
+// registro nuevo por cada resolución. La vigencia (VIGENTE/POR_VENCER/
+// VENCIDO) se deriva siempre de `expirationDate` en el backend — nunca se
+// persiste. `status` es el estado de trámite/workflow manual, distinto de
+// la vigencia por fecha.
+// ---------------------------------------------------------------------------
+
+enum SanitaryRegistrationStatus {
+  DRAFT
+  IN_PROCESS
+  VALID
+  EXPIRING
+  EXPIRED
+  SUSPENDED
+}
+
+enum SanitaryRegistrationChangeType {
+  INSCRIPCION
+  MODIFICACION
+  RENOVACION
+  ACTUALIZACION
+  OTRO
+}
+
+model SanitaryRegistration {
+  id                 Int                        @id @default(autoincrement())
+  code               String                     @unique
+  registrationNumber String                     @unique
+  title              String
+  medicalDeviceClass String?
+  issuingAuthority   String?
+  manufacturer       String?
+  country            String?
+  brand              String?
+  issueDate          DateTime?
+  expirationDate     DateTime?
+  status             SanitaryRegistrationStatus @default(VALID)
+  notes              String?                    @db.Text
+  active             Boolean                    @default(true)
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+
+  items     SanitaryRegistrationItem[]
+  changes   SanitaryRegistrationChange[]
+  documents SanitaryRegistrationDocument[]
+
+  @@map("sanitary_registrations")
+}
+
+/**
+ * Cada código/producto autorizado dentro del Registro Sanitario. Los
+ * campos `official*Summary` son una instantánea regulatoria tomada del
+ * PDF (material, gramaje, medidas, colores, presentación) — no reemplazan
+ * al maestro de Producto y pueden no coincidir exactamente con su
+ * configuración interna actual. `productId` solo se llena cuando hay una
+ * equivalencia clara con el maestro; muchos ítems oficiales no tienen
+ * producto interno equivalente todavía.
+ */
+model SanitaryRegistrationItem {
+  id                     Int      @id @default(autoincrement())
+  sanitaryRegistrationId Int
+  officialItemNumber     Int?
+  officialCode           String
+  officialDescription    String
+  productId              Int?
+  materialSummary        String?  @db.Text
+  grammageSummary        String?
+  dimensionsSummary      String?  @db.Text
+  colorsSummary          String?  @db.Text
+  presentationSummary    String?  @db.Text
+  notes                  String?  @db.Text
+  active                 Boolean  @default(true)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  sanitaryRegistration SanitaryRegistration @relation(fields: [sanitaryRegistrationId], references: [id], onDelete: Cascade)
+  product              Product?             @relation(fields: [productId], references: [id])
+
+  @@index([sanitaryRegistrationId])
+  @@index([productId])
+  @@map("sanitary_registration_items")
+}
+
+/**
+ * Resolución directoral que dio origen o modificó el registro: inscripción
+ * original, inclusión de nuevos códigos, actualización de rotulado,
+ * renovación, etc. Todas pertenecen al mismo `SanitaryRegistration`.
+ */
+model SanitaryRegistrationChange {
+  id                     Int                            @id @default(autoincrement())
+  sanitaryRegistrationId Int
+  resolutionNumber       String
+  changeType             SanitaryRegistrationChangeType
+  resolutionDate         DateTime?
+  effectiveDate          DateTime?
+  description            String                         @db.Text
+  notes                  String?                        @db.Text
+  createdAt              DateTime                       @default(now())
+  updatedAt              DateTime                       @updatedAt
+
+  sanitaryRegistration SanitaryRegistration           @relation(fields: [sanitaryRegistrationId], references: [id], onDelete: Cascade)
+  documents            SanitaryRegistrationDocument[]
+
+  @@index([sanitaryRegistrationId])
+  @@map("sanitary_registration_changes")
+}
+
+model SanitaryRegistrationDocument {
+  id                            Int       @id @default(autoincrement())
+  sanitaryRegistrationId        Int
+  sanitaryRegistrationChangeId  Int?
+  fileName                      String
+  storagePath                   String
+  mimeType                      String
+  fileSize                      Int
+  documentDate                  DateTime?
+  documentType                  String
+  uploadedAt                    DateTime  @default(now())
+
+  sanitaryRegistration SanitaryRegistration        @relation(fields: [sanitaryRegistrationId], references: [id], onDelete: Cascade)
+  change               SanitaryRegistrationChange? @relation(fields: [sanitaryRegistrationChangeId], references: [id], onDelete: SetNull)
+
+  @@index([sanitaryRegistrationId])
+  @@index([sanitaryRegistrationChangeId])
+  @@map("sanitary_registration_documents")
+}
+
+// ---------------------------------------------------------------------------
+// Iteración 12: Rendimiento de Mandiles por Rollo de Tela. Dato técnico de
+// PLANEAMIENTO (rollos de tela por OP), no un reemplazo de la BOM ni de la
+// ficha técnica: la BOM sigue siendo la única fuente de materiales
+// requeridos. `ProductMaterialYield` responde "¿cuántas unidades produce un
+// rollo de esta tela/gramaje para esta talla?" — se usa para ESTIMAR rollos
+// necesarios (mostrado como bloque informativo en OP/Planeamiento), nunca
+// para alterar automáticamente la explosión de BOM ni cantidades de OP ya
+// generadas.
+// ---------------------------------------------------------------------------
+
+/**
+ * Rendimiento real de corte de un producto (p.ej. un mandil por talla) a
+ * partir de un rollo de una materia prima (tela) específica, por gramaje.
+ * No sobrescribe `Product.width/length` (que describen el producto en
+ * general): `cutWidth/cutLength` son la medida de corte de ESTA
+ * combinación producto+tela+gramaje, que puede variar por gramaje incluso
+ * para la misma talla (ver fuente real: L a 40g corta 125×155, a 35g corta
+ * 117×152). `sourceRollWidth/sourceRollLength/sourceGrammage` son una
+ * instantánea de la ficha de origen (rollo real usado para calcular este
+ * rendimiento) — pueden no coincidir exactamente con el ancho/largo/
+ * gramaje actuales del maestro de Materia Prima vinculado (p.ej. si ese
+ * material ya se usa en otras composiciones con una configuración de rollo
+ * distinta); en ese caso la diferencia se documenta en `notes`, nunca se
+ * sobrescribe el maestro compartido.
+ */
+model ProductMaterialYield {
+  id            Int    @id @default(autoincrement())
+  productId     Int
+  rawMaterialId Int
+  // Talla que cubre este rendimiento — se deriva de `Product.size` al
+  // crear el registro (nunca se deja divergir del producto vinculado).
+  productSize   String
+
+  cutWidth  Decimal? @db.Decimal(10, 3)
+  cutLength Decimal? @db.Decimal(10, 3)
+
+  unitsPerRoll Int
+
+  sourceRollWidth  Decimal? @db.Decimal(10, 3)
+  sourceRollLength Decimal? @db.Decimal(10, 3)
+  sourceGrammage   Decimal? @db.Decimal(10, 3)
+
+  effectiveFrom DateTime @default(now())
+  notes         String?  @db.Text
+  active        Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  product     Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  rawMaterial RawMaterial @relation(fields: [rawMaterialId], references: [id])
+
+  @@unique([productId, rawMaterialId, productSize, effectiveFrom])
+  @@index([productId])
+  @@index([rawMaterialId])
+  @@map("product_material_yields")
+}
